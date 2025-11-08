@@ -1,0 +1,104 @@
+name: Pack builder
+description: Build a container image using `pack`
+
+inputs:
+  image:
+    required: false
+    type: string
+    default: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  path:
+    required: false
+    type: string
+    default: "."
+  runtime_release:
+    required: false
+    type: string
+  builder:
+    required: false
+    type: string
+    default: "heroku/builder:24"
+  buildpack:
+    required: false
+    type: string
+    default: "heroku/python"
+  build_env:
+    required: false
+    type: string
+    default: ""
+  runtime_env:
+    required: false
+    type: string
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install pack
+      shell: bash
+      run: |
+        sudo add-apt-repository ppa:cncf-buildpacks/pack-cli
+        sudo apt-get update
+        sudo apt-get install -y pack-cli
+
+    - name: Build image
+      shell: bash
+      run: |
+        build_args=(
+          "--builder" "${{ inputs.builder }}"
+          "--path" "${{ inputs.path }}"
+        )
+        
+        if [ ! -z "${{ inputs.build_env }}" ];
+        then
+          while IFS= read -r build_env;
+          do
+            if [ ! -z "$build_env" ];
+            then
+              build_args+=("-e" "$build_env")
+            fi
+          done <<< "${{ inputs.build_env }}"
+        fi
+
+        # x-ref https://github.com/heroku/cnb-builder-images/blob/main/builder-24/builder.toml
+        build_args+=(
+          "--buildpack" "${{ inputs.buildpack }}"
+        )
+        if [ -f "${{ inputs.path }}/project.toml" ];
+        then
+          build_args+=("--buildpack" "heroku/deb-packages")
+        fi
+        if [ -f "${{ inputs.path }}/Procfile" ];
+        then
+          build_args+=("--buildpack" "heroku/procfile")
+        fi
+
+        # Future proof handling other vars
+        # We only want to include the extra pack if the work is needed
+        runtime_env_vars=()
+        if [ ! -z "${{ inputs.runtime_release }}" ];
+        then
+          runtime_env_vars+=(-e "RUNTIME_ENVVAR_RELEASE_TAG=${{ inputs.runtime_release }}")
+        fi
+        
+        if [ ! -z "${{ inputs.runtime_env }}" ];
+        then
+          while IFS= read -r runtime_env;
+          do
+            if [ ! -z "$runtime_env" ];
+            then
+              runtime_env_vars+=("-e" "$(echo "$runtime_env" | sed 's/^/RUNTIME_ENVVAR_/')")
+            fi
+          done <<< "${{ inputs.runtime_env }}"
+        fi
+
+        if [ ! -z "$runtime_env_vars" ];
+        then
+          build_args+=(
+            "--buildpack" "https://github.com/InfraBits/envvar-buildpack/releases/download/v1.0.0/buildpack.tar.gz"
+          )
+          build_args+=("${runtime_env_vars[@]}")
+        fi
+        
+        # Avoid set -x as it exposes secrets contained in inputs.build_args
+        echo "Running pack for ${{ inputs.image }} with ${build_args[@]}"
+        pack build "${{ inputs.image }}" "${build_args[@]}"
